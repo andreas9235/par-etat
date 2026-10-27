@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vue par État membre</title>
+<script src="https://grist.numerique.gouv.fr/grist-plugin-api.js"></script>
+<style>
+:root{--ink:#1d2433;--mute:#667085;--line:#d9dde6;--bg:#f5f6f9}
+*{box-sizing:border-box}
+body{margin:0;padding:12px;font:14px/1.4 system-ui,"Segoe UI",sans-serif;color:var(--ink);background:var(--bg)}
+button,select,input,textarea{font:inherit;color:inherit}
+select,input,textarea{border:1px solid var(--line);border-radius:6px;background:#fff;padding:6px 10px;width:100%}
+textarea{min-height:60px;resize:vertical}
+.toolbar{display:flex;gap:10px;align-items:center;margin-bottom:12px}
+.toolbar select{width:auto;min-width:260px;font-weight:600}
+h2{margin:0}h3{margin:18px 0 8px}
+.msg{color:var(--mute);padding:16px}
+.mute{color:var(--mute);font-size:12px}
+#err{background:#fde4e1;color:#9a1b10;border:1px solid #f1b5ae;border-radius:6px;padding:8px 10px;margin-bottom:10px}
+#err[hidden]{display:none}
+.blk{background:#fff;border:1px solid var(--line);border-left:5px solid var(--c);border-radius:6px;padding:10px 12px;margin-bottom:10px}
+.blk.LR{--c:#c62828}.blk.PR{--c:#e07b00}
+.blk .t{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px}
+.ln{margin-top:6px}
+.chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:3px}
+.chip{font-size:12px;padding:1px 8px;border:2px solid var(--c);border-radius:10px;background:#fff;white-space:nowrap}
+.pos{font-size:12px;font-weight:600;color:#fff;padding:1px 8px;border-radius:10px;background:var(--c)}
+.bd{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;font-size:9px;font-weight:700;color:#fff;margin-left:4px;vertical-align:middle}
+.bd.PR{background:#e07b00}.bd.LR{background:#c62828}
+.chip .bd{width:16px;height:16px;font-size:8px}
+details{background:#fff;border:1px solid var(--line);border-radius:6px;margin-top:10px}
+summary{cursor:pointer;padding:8px 10px;font-weight:600;background:#eceef3;border-radius:6px}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}
+.st{padding:8px 10px;border-top:1px solid var(--line)}
+.st label{display:block;margin:8px 0 3px;font-weight:600}
+@media(max-width:800px){.g2{grid-template-columns:1fr}}
+:focus-visible{outline:2px solid #2b59c3;outline-offset:1px}
+</style>
+</head>
+<body>
+<div id="err" hidden></div>
+<div class="toolbar" id="toolbar"></div>
+<div id="app"></div>
+<script>
+const POS=[
+ {k:'Beaucoup moins ambitieux',c:'#9a1b10'},{k:'Moins ambitieux',c:'#d9603b'},{k:'Commission',c:'#003399'},
+ {k:'Plus ambitieux',c:'#3f9a6d'},{k:'Beaucoup plus ambitieux',c:'#0c5c3c'}];
+const NI={k:'Non identifié',c:'#aab1bf'};
+const [K0,K1,K2,K3,K4]=POS.map(p=>p.k);
+const GRP={[K0]:'moins',[K1]:'moins',[K2]:'centre',[K3]:'plus',[K4]:'plus'};
+// positions opposées à chaque groupe
+const OPP={centre:[K0,K4],plus:[K0,K1],moins:[K3,K4]};
+const NAMES=['code','etat','poids','theme','sousTheme','position','notes','source','repere'];
+let rows=[],cur='',TOTAL=0,openThemes={};
+const norm=s=>(s==null?'':String(s)).trim().toLowerCase();
+const posOf=r=>POS.find(p=>norm(p.k)===norm(r.position))||NI;
+const posKey=r=>posOf(r).k;
+const mk=r=>{const v=String(r.repere||'').trim().toUpperCase();return v==='PR'||v==='LR'?v:''};
+const pct=r=>TOTAL?(Number(r.poids)||0)/TOTAL*100:0;
+const fmt=x=>x.toFixed(1).replace('.',',');
+const uniq=a=>[...new Set(a.filter(Boolean))];
+const h=(t,a={},...c)=>{const e=document.createElement(t);
+ for(const[k,v]of Object.entries(a)){if(k==='class')e.className=v;else if(k==='style')e.style.cssText=v;else if(k.startsWith('on'))e.addEventListener(k.slice(2),v);else e.setAttribute(k,v)}
+ e.append(...c.flat().filter(x=>x!=null&&x!==false));return e};
+const opt=(v,l,sel)=>{const o=h('option',{},l);o.value=v;o.selected=sel;return o};
+const badge=m=>m?h('span',{class:'bd '+m,title:m==='PR'?'Priorité':'Ligne rouge'},m):null;
+const err=e=>{const b=document.getElementById('err');b.hidden=false;
+ b.textContent='Écriture impossible : '+((e&&e.message)||e)+'. Vérifiez que le widget a l’accès complet au document et que vous avez les droits d’édition.'};
+// Ne garde que les colonnes fournies (mapColumnNamesBack seul remplit les autres avec du vide)
+const back=f=>{const probe={};NAMES.forEach(n=>probe[n]=n);const m=grist.mapColumnNamesBack(probe),inv={};
+ Object.entries(m).forEach(([c,n])=>{if(NAMES.includes(n))inv[n]=c});
+ const o={};Object.entries(f).forEach(([k,v])=>{if(inv[k])o[inv[k]]=v});
+ if(!Object.keys(o).length)throw new Error('colonne non associée dans la configuration du widget');return o};
+
+grist.ready({requiredAccess:'full',columns:[
+ {name:'code',title:'Code État membre',type:'Text'},
+ {name:'etat',title:'État membre',type:'Text'},
+ {name:'poids',title:'Poids (%)',type:'Numeric'},
+ {name:'theme',title:'Thème',type:'Text'},
+ {name:'sousTheme',title:'Sous-thème',type:'Text'},
+ {name:'position',title:'Position',type:'Text,Choice'},
+ {name:'notes',title:'Notes',type:'Text',optional:true},
+ {name:'source',title:'Source',type:'Text',optional:true},
+ {name:'repere',title:'Importance',type:'Text,Choice',optional:true}]});
+grist.onRecords(recs=>{
+ rows=grist.mapColumnNames(recs)||[];
+ const by={};rows.forEach(r=>{if(r.code&&!(r.code in by))by[r.code]=Number(r.poids)||0});
+ TOTAL=Object.values(by).reduce((a,b)=>a+b,0);
+ const a=document.activeElement;
+ if(a&&a.closest&&a.closest('#app')&&a.matches('textarea,input'))return;
+ render();
+});
+async function save(id,fields){
+ try{await grist.selectedTable.update({id,fields:back(fields)});
+  const r=rows.find(x=>x.id===id);if(r)Object.assign(r,fields);
+  document.getElementById('err').hidden=true;return true}
+ catch(e){err(e);return false}
+}
+
+function render(){
+ const tb=document.getElementById('toolbar'),app=document.getElementById('app');
+ tb.replaceChildren();app.replaceChildren();
+ if(!rows.length){app.append(h('div',{class:'msg'},'Aucune donnée. Associez les colonnes dans le panneau de configuration du widget.'));return}
+ const seen={};rows.forEach(r=>{if(r.code&&!seen[r.code])seen[r.code]={code:r.code,etat:r.etat}});
+ const states=Object.values(seen).sort((a,b)=>String(a.etat).localeCompare(String(b.etat),'fr'));
+ if(!seen[cur])cur=states[0]?states[0].code:'';
+ tb.append(h('select',{'aria-label':'État membre',onchange:e=>{cur=e.target.value;render()}},states.map(s=>opt(s.code,`${s.etat} (${s.code})`,s.code===cur))));
+ const mine=rows.filter(r=>r.code===cur);
+ if(!mine.length)return;
+ const idx={};rows.forEach(r=>{const k=r.theme+'\u0001'+r.sousTheme;(idx[k]=idx[k]||[]).push(r)});
+ const byW=(a,b)=>pct(b)-pct(a);
+ const chip=x=>h('span',{class:'chip',style:`--c:${posOf(x).c}`,title:posKey(x)},x.etat,badge(mk(x)));
+ const sum=a=>`${a.length} État${a.length>1?'s':''} · ${fmt(a.reduce((t,x)=>t+pct(x),0))} %`;
+ const block=r=>{
+  const g=GRP[posKey(r)],others=(idx[r.theme+'\u0001'+r.sousTheme]||[]).filter(x=>x.code!==r.code);
+  const prox=g?others.filter(x=>GRP[posKey(x)]===g).sort(byW):[];
+  const opp=g?others.filter(x=>OPP[g].includes(posKey(x))&&mk(x)).sort(byW):[];
+  return h('div',{class:'blk '+mk(r)},
+   h('div',{class:'t'},h('b',{},`${r.theme} › ${r.sousTheme}`),h('span',{class:'pos',style:`--c:${posOf(r).c}`},posKey(r)),badge(mk(r))),
+   !g?h('div',{class:'mute'},'Position non identifiée : pas de comparaison possible.'):null,
+   g?h('div',{class:'ln'},h('b',{},'États proches'),h('span',{class:'mute'},prox.length?` (${sum(prox)})`:''),
+     prox.length?h('div',{class:'chips'},prox.map(chip)):h('div',{class:'mute'},'Aucun')):null,
+   g?h('div',{class:'ln'},h('b',{},'États opposés ayant marqué ce sous-thème'),h('span',{class:'mute'},opp.length?` (${sum(opp)})`:''),
+     opp.length?h('div',{class:'chips'},opp.map(chip)):h('div',{class:'mute'},'Aucun')):null,
+   r.notes?h('div',{class:'ln mute'},'Notes : '+r.notes):null)};
+
+ const base=mine[0],lr=mine.filter(r=>mk(r)==='LR'),pr=mine.filter(r=>mk(r)==='PR');
+ app.append(h('h2',{},`${base.etat} (${base.code})`),h('div',{class:'mute'},`${fmt(pct(base))} % de la population · ${lr.length} ligne${lr.length>1?'s':''} rouge${lr.length>1?'s':''} · ${pr.length} priorité${pr.length>1?'s':''}`));
+ app.append(h('h3',{},'Lignes rouges',badge('LR')),...(lr.length?lr.map(block):[h('div',{class:'msg'},'Aucune ligne rouge renseignée.')]));
+ app.append(h('h3',{},'Priorités',badge('PR')),...(pr.length?pr.map(block):[h('div',{class:'msg'},'Aucune priorité renseignée.')]));
+
+ const sub=r=>{
+  const sp=h('select',{onchange:async e=>{if(await save(r.id,{position:e.target.value}))render()}},[...POS,NI].map(p=>opt(p===NI?'':p.k,p.k,posKey(r)===p.k)));
+  const ms=h('select',{onchange:async e=>{if(await save(r.id,{repere:e.target.value}))render()}},[['',''],['PR','(PR) Priorité'],['LR','(LR) Ligne rouge']].map(([v,l])=>opt(v,l,mk(r)===v)));
+  const nt=h('textarea',{onchange:async e=>{if(await save(r.id,{notes:e.target.value}))render()}});nt.value=r.notes||'';
+  const sc=h('input',{onchange:async e=>{if(await save(r.id,{source:e.target.value}))render()}});sc.value=r.source||'';
+  return h('div',{class:'st'},h('b',{},r.sousTheme,badge(mk(r))),h('label',{},'Position'),sp,h('label',{},'Importance'),ms,h('label',{},'Notes'),nt,h('label',{},'Source'),sc)};
+ app.append(h('h3',{},'Toutes les positions'));
+ uniq(mine.map(r=>r.theme)).forEach(t=>{
+  const det=h('details',{},h('summary',{},t));
+  det.open=openThemes[t]!==false;
+  det.addEventListener('toggle',()=>{openThemes[t]=det.open});
+  det.append(h('div',{class:'g2'},mine.filter(r=>r.theme===t).map(sub)));
+  app.append(det)});
+}
+</script>
+</body>
+</html>
